@@ -1,0 +1,15 @@
+
+version: "3"
+services:
+  tasmota-fix:
+    build: .
+    restart: always
+    environment:
+      PROM_URL: http://prometheus:9090
+      TASMOTA_TOPIC: tasmota_E2E13F
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+      MQTT_USER: youruser
+      MQTT_PASS: yourpass
+    volumes:
+      - ./data:/data
