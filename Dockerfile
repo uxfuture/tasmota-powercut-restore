@@ -1,10 +1,10 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY main.py .
+COPY main.py requirements.txt .
 
-RUN pip install requests paho-mqtt
+RUN pip install -r requirements.txt
 
 VOLUME ["/data"]
 
-CMD ["python", "main.py"]
+CMD ["python", "-u", "main.py"]

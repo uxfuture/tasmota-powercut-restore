@@ -1,74 +1,54 @@
-import os
-import time
+import os, datetime
+import paho.mqtt.client as mqtt
 import json
-import requests
-from datetime import datetime
-import paho.mqtt.publish as publish
-
-PROMETHEUS_URL = os.environ.get("PROM_URL", "http://prometheus:9090")
-TOPIC = os.environ.get("TASMOTA_TOPIC", "tasmota_E2E13F")
-MQTT_BROKER = os.environ.get("MQTT_HOST", "mqtt")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
-MQTT_USER = os.environ.get("MQTT_USER")
-MQTT_PASS = os.environ.get("MQTT_PASS")
-
-STATE_FILE = "/data/last_energy.json"
+from prometheus_client import Gauge, start_http_server
 
 
-auth = None
-if MQTT_USER is not None:
-    auth = {"username": MQTT_USER}
-if MQTT_PASS is not None:
-    auth["password"] = MQTT_PASS
+# PROM_URL = os.getenv("PROM_URL", "http://localhost:9090")
+TOPIC = os.getenv("TASMOTA_TOPIC", "tasmota_E2E13F")
+MQTT_HOST = os.getenv("MQTT_HOST")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MQTT_USER = os.getenv("MQTT_USER")
+MQTT_PASS = os.getenv("MQTT_PASS")
 
+corrected = Gauge("tasmota_energy_today_corrected", "Corrected ENERGY.Today")
+state = {"carry": 0.0, "last": 0.0, "active": False}
 
-def query_prometheus(metric):
-    query = f'{metric}{{status_topic="{TOPIC}"}}'
-    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query})
-    result = resp.json()["data"]["result"]
-    return float(result[0]["value"][1]) if result else None
+def on_connect():
+    print("Connected to MQTT successfully")
+def on_connect_fail():
+    print("Connect to MQTT failed")
+def on_message(client, userdata, msg):
+    global state
+    payload = json.loads(msg.payload.decode())
+    if "ENERGY" not in payload:
+        print("There's no energy in payload", payload)
+        return
 
-def load_last_energy():
-    try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"total": 0, "today": 0}
+    today = payload["ENERGY"].get("Today", 0.0)
+    now_hour = datetime.now().hour
 
-def save_last_energy(total, today):
-    with open(STATE_FILE, "w") as f:
-        json.dump({"total": total, "today": today}, f)
-
-def send_energy_total_correction(new_total):
-    payload = str(round(new_total, 3))
-    print(f"Sending corrected EnergyTotal: {payload}")
-    publish.single(
-        topic=f"cmnd/{TOPIC}/EnergyTotal",
-        payload=payload,
-        hostname=MQTT_BROKER,
-        port=MQTT_PORT,
-        auth=auth
-    )
-
-while True:
-    now = datetime.now()
-    in_reset_window = now.hour == 0 and now.minute < 30
-
-    today = query_prometheus("tasmota_energy_today")
-    total = query_prometheus("tasmota_energy_total")
-
-    if today is None or total is None:
-        print("No data yet. Waiting...")
-        time.sleep(60)
-        continue
-
-    last = load_last_energy()
-
-    if not in_reset_window and today == 0 and last["today"] > 0:
-        print("Power cut reset detected — Restoring Saved Total...")
-        corrected_total = total + last["today"]
-        send_energy_total_correction(corrected_total)
+    if today == 0 and now_hour != 0:
+        if not state["active"]:
+            state["carry"] = state["last"]
+            state["active"] = True
+    elif today > 0 and state["active"]:
+        corrected.set(today + state["carry"])
+        state = {"carry": 0.0, "last": today, "active": False}
     else:
-        save_last_energy(total, today)
+        corrected.set(today)
+        print("Correcting Data?")
+        state["last"] = today
 
-    time.sleep(60)
+client = mqtt.Client()
+if MQTT_USER and MQTT_PASS is not None:
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+
+client.on_message = on_message
+client.connect(MQTT_HOST, MQTT_PORT, 60)
+client.on_connect = on_connect
+client.on_connect_fail = on_connect_fail
+client.subscribe(f"tele/{TOPIC}/SENSOR")
+start_http_server(9500)
+
+client.loop_forever()
